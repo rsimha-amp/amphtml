@@ -15,125 +15,96 @@
  */
 'use strict';
 
-const {
-  getNativeImagePath,
-} = require('@ampproject/google-closure-compiler/lib/utils');
-const {compiler} = require('@ampproject/google-closure-compiler');
+const compiler = require('@ampproject/google-closure-compiler');
+const gulp = require('gulp');
 const {cyan, red, yellow} = require('kleur/colors');
 const {getBabelCacheDir} = require('./pre-closure-babel');
 const {highlight} = require('cli-highlight');
-const {log} = require('../common/logging');
+const {log, logWithoutTimestamp} = require('../common/logging');
 
 /**
- * Formats a closure compiler error message into a more readable form by
- * normalizing paths and syntax highlighting the error text.
+ * Logs a closure compiler error message after formatting it into a more
+ * readable form by dropping the plugin's logging prefix, normalizing paths,
+ * emphasizing errors and warnings, and syntax highlighting the error text.
  * @param {string} message
- * @return {string}
  */
-function formatClosureCompilerError(message) {
-  if (message) {
-    const babelCacheDir = `${getBabelCacheDir()}/`;
-    const normalized = message.replace(new RegExp(babelCacheDir, 'g'), '');
-    return highlight(normalized, {ignoreIllegals: true})
-      .replace(/ WARNING /g, yellow(' WARNING '))
-      .replace(/ ERROR /g, red(' ERROR '));
-  }
+function logClosureCompilerError(message) {
+  log(red('ERROR:'));
+  const babelCacheDir = `${getBabelCacheDir()}/`;
+  const loggingPrefix = /^.*?gulp-google-closure-compiler.*?: /;
+  const formattedMessage = message
+    .replace(loggingPrefix, '')
+    .replace(new RegExp(babelCacheDir, 'g'), '')
+    .replace(/ ERROR /g, red(' ERROR '))
+    .replace(/ WARNING /g, yellow(' WARNING '));
+  logWithoutTimestamp(highlight(formattedMessage, {ignoreIllegals: true}));
 }
 
 /**
- * Handles a closure error during multi-pass compilation. Returns an error when
- * compilation fails except in watch mode, where we want to print a message and
+ * Handles a closure error during compilation and type checking. Passes through
+ * the error except in watch mode, where we want to print a failure message and
  * continue.
- *
- * @param {string} err
+ * @param {!PluginError} err
  * @param {string} outputFilename
  * @param {?Object} options
- * @return {Error|undefined}
+ * @return {!PluginError|undefined}
  */
-function handleCompilerError(err, outputFilename, options) {
-  const message = `${red('ERROR:')} Could not minify ${cyan(outputFilename)}`;
-  logError(message, err);
-  if (options && options.continueOnError) {
+function handleClosureCompilerError(err, outputFilename, options) {
+  if (options.typeCheckOnly) {
+    log(`${red('ERROR:')} Type checking failed`);
+    return err;
+  }
+  log(`${red('ERROR:')} Could not minify ${cyan(outputFilename)}`);
+  if (options.continueOnError) {
     options.errored = true;
     return;
   }
-  return new Error(message);
+  return err;
 }
 
 /**
- * Handles a closure error during type checking. Returns an error after logging
- * the detailed message.
- *
- * @param {string} err
- * @return {Error}
- */
-function handleTypeCheckError(err) {
-  const message = `${red('ERROR:')} Type checking failed`;
-  logError(message, err);
-  return new Error(message);
-}
-
-/**
- * Prints an error message when compilation fails
- * @param {string} message
- * @param {string} err
- */
-function logError(message, err) {
-  log(`${message}\n` + formatClosureCompilerError(err));
-}
-
-/**
- * Extracts the actual error message from closure compiler's stdErr by removing
- * the long preamble that ends with the full command line.
- * @param {Array<string>} flags
- * @param {string} stdErr
- * @return {string}
- */
-function getErrorText(flags, stdErr) {
-  const lastFlag = flags.slice(-1).pop();
-  return stdErr.split(lastFlag).pop();
-}
-
-/**
- * Initializes closure compiler with the given set of flags and ensures that the
- * native compiler is used during compilation.
+ * Initializes closure compiler with the given set of flags. Some notes:
+ * 1. We use closure compiler's streaming plugin because invoking a command with
+ *    a long list of flags exceeds the command line size limit on Windows.
+ * 2. Source files are consumed directly from disk via --js flags, and we pass
+ *    an empty stream to the plugin instead of converting them to Vinyl files.
+ *    This is why streamMode == IN and requireStreamInput == false.
  * @param {Array<string>} flags
  * @return {!Object}
  */
-function initializeClosure(flags) {
-  const closure = new compiler(flags);
-  closure.JAR_PATH = null;
-  closure.javaPath = getNativeImagePath();
-  return closure;
-}
+function initializeClosure(flags) {}
 
 /**
- * Runs closure compiler with the given set of flags.
+ * Runs closure compiler with the given set of flags. We call end() to signal
+ * that the empty input stream has ended, and resume() to begin compilation.
  * @param {string} outputFilename
  * @param {!Object} options
  * @param {Array<string>} flags
+ * @param {Array<string>} srcFiles
  * @return {Promise<void>}
  */
-function runClosure(outputFilename, options, flags) {
+function runClosure(outputFilename, options, flags, srcFiles) {
   return new Promise((resolve, reject) => {
-    initializeClosure(flags).run((exitCode, _code, stdErr) => {
-      if (exitCode !== 0) {
-        const err = getErrorText(flags, stdErr);
-        const reason = options.typeCheckOnly
-          ? handleTypeCheckError(err)
-          : handleCompilerError(err, outputFilename, options);
-        if (reason) {
-          reject(reason);
-          return;
-        }
-      }
-      resolve();
-    });
+    console.log(flags);
+    const pluginOptions = {
+      streamMode: 'IN',
+      requireStreamInput: false,
+      logger: logClosureCompilerError,
+    };
+
+    gulp
+      .src(srcFiles, {base: '.'})
+      .pipe(compiler.gulp()(flags, pluginOptions))
+      .on('error', (err) => {
+        const reason = handleClosureCompilerError(err, outputFilename, options);
+        reason ? reject(reason) : resolve();
+      })
+      .on('end', resolve)
+      .end()
+      .resume();
   });
 }
 
 module.exports = {
   runClosure,
-  handleCompilerError,
-  handleTypeCheckError,
 };

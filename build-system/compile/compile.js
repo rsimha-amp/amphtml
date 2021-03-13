@@ -380,13 +380,13 @@ function generateFlags(
       }
     }
   });
-  const jsFlags = transformedSrcFiles.map((src) => `--js=${src}`);
+  // const jsFlags = transformedSrcFiles.map((src) => `--js=${src}`);
   const entryPointFlags = entryModuleFilenames
     .map((entryFile) =>
       transformedSrcFiles.find((srcFile) => srcFile.endsWith(entryFile))
     )
     .map((entryPoint) => `--entry_point=${entryPoint}`);
-  const flags = compilerFlags.concat(entryPointFlags, jsFlags);
+  const flags = compilerFlags.concat(entryPointFlags);
   if (!options.typeCheckOnly) {
     const outputFileFlag = `--js_output_file=${destFile}`;
     const sourcemapFlag = `--create_source_map=${sourcemapFile}`;
@@ -442,7 +442,7 @@ async function compile(
     destFile,
     sourcemapFile
   );
-  await runClosure(outputFilename, options, flags);
+  await runClosure(outputFilename, options, flags, transformedSrcFiles);
   if (!options.typeCheckOnly) {
     if (!argv.pseudo_names && !options.skipUnknownDepsCheck) {
       await checkForUnknownDeps(destFile);
